@@ -138,22 +138,25 @@ def generate_content_with_openai(base_script: str, research_data: str = "") -> D
         char_limit = int(os.environ.get('CHARACTER_LIMIT', 280))
         
         prompt = f"""
-        Create an engaging Twitter post based on this base script: "{base_script}"
+        Create a Twitter post that is EXACTLY {char_limit} characters including everything.
 
-        IMPORTANT RESEARCH TO INCORPORATE: {research_data}
+        REQUIRED CONTENT TO INCLUDE LITERALLY:
+        Base script: "{base_script}"
+        Signature: "{DEVELOPER_TG}"
+        
+        RESEARCH TO ADD: {research_data}
 
-        Requirements:
-        - Must be exactly {char_limit-5} to {char_limit} characters including hashtags and signature
-        - Use the base script as the foundation but enhance it with the research insights
-        - If research contains hashtags, use them; if not, add relevant trending hashtags
-        - If research mentions @ accounts, incorporate them naturally
-        - Analyze WHY the trending topics are relevant and use that insight
-        - Make it sound natural, not like you're just combining elements
-        - Add {DEVELOPER_TG} signature at the end
-        - Make it unique and different from typical AI-generated content
-        - Be timely and relevant based on the research provided
-
-        Focus on making the base script more engaging using the research insights, don't just append them.
+        CRITICAL REQUIREMENTS:
+        - Post must be EXACTLY {char_limit} characters total (count every character)
+        - MUST include the COMPLETE base script word-for-word: "{base_script}"
+        - MUST include signature: "{DEVELOPER_TG}"
+        - Add relevant content based on research to reach exactly {char_limit} characters
+        - Use trending hashtags and mentions from research if available
+        - Make added content natural and engaging
+        - Count characters carefully to hit exactly {char_limit}
+        
+        Format: [Additional engaging content] + [Complete base script] + [Signature]
+        VERIFY: Total character count = {char_limit}
         """
 
         # Try multiple models in order of preference
@@ -196,22 +199,25 @@ def generate_content_with_groq(base_script: str, research_data: str = "") -> Dic
         char_limit = int(os.environ.get('CHARACTER_LIMIT', 280))
         
         prompt = f"""
-        Create an engaging Twitter post based on this base script: "{base_script}"
+        Create a Twitter post that is EXACTLY {char_limit} characters including everything.
 
-        IMPORTANT RESEARCH TO INCORPORATE: {research_data}
+        REQUIRED CONTENT TO INCLUDE LITERALLY:
+        Base script: "{base_script}"
+        Signature: "{DEVELOPER_TG}"
+        
+        RESEARCH TO ADD: {research_data}
 
-        Requirements:
-        - Must be exactly {char_limit-5} to {char_limit} characters including hashtags and signature
-        - Use the base script as the foundation but enhance it with the research insights
-        - If research contains hashtags, use them; if not, add relevant trending hashtags
-        - If research mentions @ accounts, incorporate them naturally
-        - Analyze WHY the trending topics are relevant and use that insight
-        - Make it sound natural, not like you're just combining elements
-        - Add {DEVELOPER_TG} signature at the end
-        - Make it unique and different from typical AI-generated content
-        - Be timely and relevant based on the research provided
-
-        Focus on making the base script more engaging using the research insights, don't just append them.
+        CRITICAL REQUIREMENTS:
+        - Post must be EXACTLY {char_limit} characters total (count every character)
+        - MUST include the COMPLETE base script word-for-word: "{base_script}"
+        - MUST include signature: "{DEVELOPER_TG}"
+        - Add relevant content based on research to reach exactly {char_limit} characters
+        - Use trending hashtags and mentions from research if available
+        - Make added content natural and engaging
+        - Count characters carefully to hit exactly {char_limit}
+        
+        Format: [Additional engaging content] + [Complete base script] + [Signature]
+        VERIFY: Total character count = {char_limit}
         """
 
         models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768"]
@@ -253,22 +259,25 @@ def generate_content_with_deepseek(base_script: str, research_data: str = "") ->
         char_limit = int(os.environ.get('CHARACTER_LIMIT', 280))
         
         prompt = f"""
-        Create an engaging Twitter post based on this base script: "{base_script}"
+        Create a Twitter post that is EXACTLY {char_limit} characters including everything.
 
-        IMPORTANT RESEARCH TO INCORPORATE: {research_data}
+        REQUIRED CONTENT TO INCLUDE LITERALLY:
+        Base script: "{base_script}"
+        Signature: "{DEVELOPER_TG}"
+        
+        RESEARCH TO ADD: {research_data}
 
-        Requirements:
-        - Must be exactly {char_limit-5} to {char_limit} characters including hashtags and signature
-        - Use the base script as the foundation but enhance it with the research insights
-        - If research contains hashtags, use them; if not, add relevant trending hashtags
-        - If research mentions @ accounts, incorporate them naturally
-        - Analyze WHY the trending topics are relevant and use that insight
-        - Make it sound natural, not like you're just combining elements
-        - Add {DEVELOPER_TG} signature at the end
-        - Make it unique and different from typical AI-generated content
-        - Be timely and relevant based on the research provided
-
-        Focus on making the base script more engaging using the research insights, don't just append them.
+        CRITICAL REQUIREMENTS:
+        - Post must be EXACTLY {char_limit} characters total (count every character)
+        - MUST include the COMPLETE base script word-for-word: "{base_script}"
+        - MUST include signature: "{DEVELOPER_TG}"
+        - Add relevant content based on research to reach exactly {char_limit} characters
+        - Use trending hashtags and mentions from research if available
+        - Make added content natural and engaging
+        - Count characters carefully to hit exactly {char_limit}
+        
+        Format: [Additional engaging content] + [Complete base script] + [Signature]
+        VERIFY: Total character count = {char_limit}
         """
 
         response = deepseek_client.chat.completions.create(
@@ -302,22 +311,25 @@ def generate_content_with_gemini(base_script: str, research_data: str = "") -> D
         char_limit = int(os.environ.get('CHARACTER_LIMIT', 280))
         
         prompt = f"""
-        Create an engaging Twitter post based on this base script: "{base_script}"
+        Create a Twitter post that is EXACTLY {char_limit} characters including everything.
 
-        IMPORTANT RESEARCH TO INCORPORATE: {research_data}
+        REQUIRED CONTENT TO INCLUDE LITERALLY:
+        Base script: "{base_script}"
+        Signature: "{DEVELOPER_TG}"
+        
+        RESEARCH TO ADD: {research_data}
 
-        Requirements:
-        - Must be exactly {char_limit-5} to {char_limit} characters including hashtags and signature
-        - Use the base script as the foundation but enhance it with the research insights
-        - If research contains hashtags, use them; if not, add relevant trending hashtags
-        - If research mentions @ accounts, incorporate them naturally
-        - Analyze WHY the trending topics are relevant and use that insight
-        - Make it sound natural, not like you're just combining elements
-        - Add {DEVELOPER_TG} signature at the end
-        - Make it unique and different from typical AI-generated content
-        - Be timely and relevant based on the research provided
-
-        Focus on making the base script more engaging using the research insights, don't just append them.
+        CRITICAL REQUIREMENTS:
+        - Post must be EXACTLY {char_limit} characters total (count every character)
+        - MUST include the COMPLETE base script word-for-word: "{base_script}"
+        - MUST include signature: "{DEVELOPER_TG}"
+        - Add relevant content based on research to reach exactly {char_limit} characters
+        - Use trending hashtags and mentions from research if available
+        - Make added content natural and engaging
+        - Count characters carefully to hit exactly {char_limit}
+        
+        Format: [Additional engaging content] + [Complete base script] + [Signature]
+        VERIFY: Total character count = {char_limit}
         """
 
         # Try Gemini generation
