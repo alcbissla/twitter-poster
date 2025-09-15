@@ -61,6 +61,9 @@ telegram_app = None
 admin_chat_id = None
 telegram_loop = None
 
+# Flag to track if background processes have been initialized
+_background_processes_initialized = False
+
 # Configuration from environment variables
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
@@ -120,9 +123,30 @@ app_data = {
     'initial_post_done': False,
     'last_heartbeat': None,
     'server_start_time': datetime.now().isoformat(),
-    'awaiting_input': None,  # 'base' or 'instant' when waiting for user input
-    'temp_message_id': None  # Store message ID for editing
+    'awaiting_input': None,  # 'base', 'instant', 'retweet', 'comment' when waiting for user input
+    'temp_message_id': None,  # Store message ID for editing
+    'pending_tweet_url': None,  # Store tweet URL for retweet/comment actions
+    'interaction_history': []  # Store history of tweet interactions (like, retweet, comment)
 }
+
+# Auto-initialize background processes for production deployments
+def _auto_init_background_processes():
+    """Auto-initialize background processes when the module is imported for production"""
+    try:
+        # Only initialize if we're not in a development reload scenario
+        import os
+        if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+            import threading
+            # Use a short delay to ensure Flask app is fully configured
+            timer = threading.Timer(2.0, initialize_background_processes)
+            timer.daemon = True
+            timer.start()
+            logger.info("🔄 Background processes auto-initialization scheduled for production")
+    except Exception as e:
+        logger.warning(f"Auto-initialization setup failed: {e}")
+
+# Schedule auto-initialization (will be called later when initialize_background_processes is defined)
+_auto_init_scheduled = False
 
 # ============================================================================
 # AI CONTENT GENERATION FUNCTIONS
@@ -136,27 +160,34 @@ def generate_content_with_openai(base_script: str, research_data: str = "") -> D
     try:
         # Get character limit from environment
         char_limit = int(os.environ.get('CHARACTER_LIMIT', 280))
-        
+
         prompt = f"""
         Create a Twitter post that is EXACTLY {char_limit} characters including everything.
 
         REQUIRED CONTENT TO INCLUDE LITERALLY:
         Base script: "{base_script}"
-        Signature: "{DEVELOPER_TG}"
-        
+
         RESEARCH TO ADD: {research_data}
 
-        CRITICAL REQUIREMENTS:
-        - Post must be EXACTLY {char_limit} characters total (count every character)
+        STYLE REQUIREMENTS - CREATE EXCITING ENGAGING CONTENT:
         - MUST include the COMPLETE base script word-for-word: "{base_script}"
-        - MUST include signature: "{DEVELOPER_TG}"
-        - Add relevant content based on research to reach exactly {char_limit} characters
-        - Use trending hashtags and mentions from research if available
-        - Make added content natural and engaging
-        - Count characters carefully to hit exactly {char_limit}
-        
-        Format: [Additional engaging content] + [Complete base script] + [Signature]
-        VERIFY: Total character count = {char_limit}
+        - Post must be EXACTLY {char_limit} characters total (count every character)
+        - START with exciting emojis and phrases like: 🔥 HUGE news!, 🚀 BREAKING!, ⚡ BIG UPDATE!, 🔥 ON FIRE!, 🚀 ROCKETING!
+        - Use engaging language: "This is NOT a drill!", "Don't miss out!", "Limited spots!", "Act fast!", "BIG thing!"
+        - Add relevant fire 🔥, rocket 🚀, lightning ⚡, gems 💎, money 💰 emojis
+        - Make it sound urgent and exciting like a major announcement
+        - Connect the excitement to the hashtags and mentions naturally
+        - End with call-to-action phrases if space allows
+
+        EXCITING FORMAT: 
+        [🔥/🚀 EXCITING opener with emojis] [Why this is huge/important] [Complete base script]
+
+        EXAMPLE STYLE:
+        - "🔥 HUGE news! [coin] is ON FIRE! 🔥 Partnering with..."
+        - "🚀 [project] is ROCKETING! 🚀🔥 Join the revolution..."
+        - "⚡ BIG UPDATE! This is NOT a drill..."
+
+        VERIFY: Total character count = {char_limit} AND base script included completely
         """
 
         # Try multiple models in order of preference
@@ -173,7 +204,16 @@ def generate_content_with_openai(base_script: str, research_data: str = "") -> D
 
                 content = response.choices[0].message.content
                 if content:
-                    return {"success": True, "content": optimize_character_count(content.strip()), "error": None}
+                    # Extract analysis content and use safe assembly function
+                    content_clean = content.strip()
+                    final_content = assemble_post(base_script, "", content_clean)
+
+                    # Validate the final post
+                    validation = validate_post_content(final_content, base_script, "")
+                    if not validation['valid']:
+                        logger.warning(f"OpenAI content validation failed: {validation}")
+
+                    return {"success": True, "content": final_content, "error": None}
 
             except Exception as model_error:
                 logger.warning(f"Model {model} failed: {model_error}")
@@ -197,27 +237,34 @@ def generate_content_with_groq(base_script: str, research_data: str = "") -> Dic
     try:
         # Get character limit from environment
         char_limit = int(os.environ.get('CHARACTER_LIMIT', 280))
-        
+
         prompt = f"""
         Create a Twitter post that is EXACTLY {char_limit} characters including everything.
 
         REQUIRED CONTENT TO INCLUDE LITERALLY:
         Base script: "{base_script}"
-        Signature: "{DEVELOPER_TG}"
-        
+
         RESEARCH TO ADD: {research_data}
 
-        CRITICAL REQUIREMENTS:
-        - Post must be EXACTLY {char_limit} characters total (count every character)
+        STYLE REQUIREMENTS - CREATE EXCITING ENGAGING CONTENT:
         - MUST include the COMPLETE base script word-for-word: "{base_script}"
-        - MUST include signature: "{DEVELOPER_TG}"
-        - Add relevant content based on research to reach exactly {char_limit} characters
-        - Use trending hashtags and mentions from research if available
-        - Make added content natural and engaging
-        - Count characters carefully to hit exactly {char_limit}
-        
-        Format: [Additional engaging content] + [Complete base script] + [Signature]
-        VERIFY: Total character count = {char_limit}
+        - Post must be EXACTLY {char_limit} characters total (count every character)
+        - START with exciting emojis and phrases like: 🔥 HUGE news!, 🚀 BREAKING!, ⚡ BIG UPDATE!, 🔥 ON FIRE!, 🚀 ROCKETING!
+        - Use engaging language: "This is NOT a drill!", "Don't miss out!", "Limited spots!", "Act fast!", "BIG thing!"
+        - Add relevant fire 🔥, rocket 🚀, lightning ⚡, gems 💎, money 💰 emojis
+        - Make it sound urgent and exciting like a major announcement
+        - Connect the excitement to the hashtags and mentions naturally
+        - End with call-to-action phrases if space allows
+
+        EXCITING FORMAT: 
+        [🔥/🚀 EXCITING opener with emojis] [Why this is huge/important] [Complete base script]
+
+        EXAMPLE STYLE:
+        - "🔥 HUGE news! [coin] is ON FIRE! 🔥 Partnering with..."
+        - "🚀 [project] is ROCKETING! 🚀🔥 Join the revolution..."
+        - "⚡ BIG UPDATE! This is NOT a drill..."
+
+        VERIFY: Total character count = {char_limit} AND base script included completely
         """
 
         models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768"]
@@ -233,7 +280,16 @@ def generate_content_with_groq(base_script: str, research_data: str = "") -> Dic
 
                 content = response.choices[0].message.content
                 if content:
-                    return {"success": True, "content": optimize_character_count(content.strip()), "error": None}
+                    # Extract analysis content and use safe assembly function
+                    content_clean = content.strip()
+                    final_content = assemble_post(base_script, "", content_clean)
+
+                    # Validate the final post
+                    validation = validate_post_content(final_content, base_script, "")
+                    if not validation['valid']:
+                        logger.warning(f"Groq content validation failed: {validation}")
+
+                    return {"success": True, "content": final_content, "error": None}
 
             except Exception as model_error:
                 logger.warning(f"Groq model {model} failed: {model_error}")
@@ -257,27 +313,34 @@ def generate_content_with_deepseek(base_script: str, research_data: str = "") ->
     try:
         # Get character limit from environment
         char_limit = int(os.environ.get('CHARACTER_LIMIT', 280))
-        
+
         prompt = f"""
         Create a Twitter post that is EXACTLY {char_limit} characters including everything.
 
         REQUIRED CONTENT TO INCLUDE LITERALLY:
         Base script: "{base_script}"
-        Signature: "{DEVELOPER_TG}"
-        
+
         RESEARCH TO ADD: {research_data}
 
-        CRITICAL REQUIREMENTS:
-        - Post must be EXACTLY {char_limit} characters total (count every character)
+        STYLE REQUIREMENTS - CREATE EXCITING ENGAGING CONTENT:
         - MUST include the COMPLETE base script word-for-word: "{base_script}"
-        - MUST include signature: "{DEVELOPER_TG}"
-        - Add relevant content based on research to reach exactly {char_limit} characters
-        - Use trending hashtags and mentions from research if available
-        - Make added content natural and engaging
-        - Count characters carefully to hit exactly {char_limit}
-        
-        Format: [Additional engaging content] + [Complete base script] + [Signature]
-        VERIFY: Total character count = {char_limit}
+        - Post must be EXACTLY {char_limit} characters total (count every character)
+        - START with exciting emojis and phrases like: 🔥 HUGE news!, 🚀 BREAKING!, ⚡ BIG UPDATE!, 🔥 ON FIRE!, 🚀 ROCKETING!
+        - Use engaging language: "This is NOT a drill!", "Don't miss out!", "Limited spots!", "Act fast!", "BIG thing!"
+        - Add relevant fire 🔥, rocket 🚀, lightning ⚡, gems 💎, money 💰 emojis
+        - Make it sound urgent and exciting like a major announcement
+        - Connect the excitement to the hashtags and mentions naturally
+        - End with call-to-action phrases if space allows
+
+        EXCITING FORMAT: 
+        [🔥/🚀 EXCITING opener with emojis] [Why this is huge/important] [Complete base script]
+
+        EXAMPLE STYLE:
+        - "🔥 HUGE news! [coin] is ON FIRE! 🔥 Partnering with..."
+        - "🚀 [project] is ROCKETING! 🚀🔥 Join the revolution..."
+        - "⚡ BIG UPDATE! This is NOT a drill..."
+
+        VERIFY: Total character count = {char_limit} AND base script included completely
         """
 
         response = deepseek_client.chat.completions.create(
@@ -289,7 +352,16 @@ def generate_content_with_deepseek(base_script: str, research_data: str = "") ->
 
         content = response.choices[0].message.content
         if content:
-            return {"success": True, "content": optimize_character_count(content.strip()), "error": None}
+            # Extract analysis content and use safe assembly function
+            content_clean = content.strip()
+            final_content = assemble_post(base_script, "", content_clean)
+
+            # Validate the final post
+            validation = validate_post_content(final_content, base_script, "")
+            if not validation['valid']:
+                logger.warning(f"DeepSeek content validation failed: {validation}")
+
+            return {"success": True, "content": final_content, "error": None}
 
         return {"success": False, "content": "", "error": "No content generated"}
 
@@ -309,27 +381,34 @@ def generate_content_with_gemini(base_script: str, research_data: str = "") -> D
     try:
         # Get character limit from environment
         char_limit = int(os.environ.get('CHARACTER_LIMIT', 280))
-        
+
         prompt = f"""
         Create a Twitter post that is EXACTLY {char_limit} characters including everything.
 
         REQUIRED CONTENT TO INCLUDE LITERALLY:
         Base script: "{base_script}"
-        Signature: "{DEVELOPER_TG}"
-        
+
         RESEARCH TO ADD: {research_data}
 
-        CRITICAL REQUIREMENTS:
-        - Post must be EXACTLY {char_limit} characters total (count every character)
+        STYLE REQUIREMENTS - CREATE EXCITING ENGAGING CONTENT:
         - MUST include the COMPLETE base script word-for-word: "{base_script}"
-        - MUST include signature: "{DEVELOPER_TG}"
-        - Add relevant content based on research to reach exactly {char_limit} characters
-        - Use trending hashtags and mentions from research if available
-        - Make added content natural and engaging
-        - Count characters carefully to hit exactly {char_limit}
-        
-        Format: [Additional engaging content] + [Complete base script] + [Signature]
-        VERIFY: Total character count = {char_limit}
+        - Post must be EXACTLY {char_limit} characters total (count every character)
+        - START with exciting emojis and phrases like: 🔥 HUGE news!, 🚀 BREAKING!, ⚡ BIG UPDATE!, 🔥 ON FIRE!, 🚀 ROCKETING!
+        - Use engaging language: "This is NOT a drill!", "Don't miss out!", "Limited spots!", "Act fast!", "BIG thing!"
+        - Add relevant fire 🔥, rocket 🚀, lightning ⚡, gems 💎, money 💰 emojis
+        - Make it sound urgent and exciting like a major announcement
+        - Connect the excitement to the hashtags and mentions naturally
+        - End with call-to-action phrases if space allows
+
+        EXCITING FORMAT: 
+        [🔥/🚀 EXCITING opener with emojis] [Why this is huge/important] [Complete base script]
+
+        EXAMPLE STYLE:
+        - "🔥 HUGE news! [coin] is ON FIRE! 🔥 Partnering with..."
+        - "🚀 [project] is ROCKETING! 🚀🔥 Join the revolution..."
+        - "⚡ BIG UPDATE! This is NOT a drill..."
+
+        VERIFY: Total character count = {char_limit} AND base script included completely
         """
 
         # Try Gemini generation
@@ -337,7 +416,16 @@ def generate_content_with_gemini(base_script: str, research_data: str = "") -> D
             response = gemini_model.generate_content(prompt)
 
             if response.text:
-                return {"success": True, "content": optimize_character_count(response.text.strip()), "error": None}
+                # Extract analysis content and use safe assembly function
+                content_clean = response.text.strip()
+                final_content = assemble_post(base_script, "", content_clean)
+
+                # Validate the final post
+                validation = validate_post_content(final_content, base_script, "")
+                if not validation['valid']:
+                    logger.warning(f"Gemini content validation failed: {validation}")
+
+                return {"success": True, "content": final_content, "error": None}
 
         except Exception as model_error:
             error_msg = str(model_error).lower()
@@ -351,7 +439,16 @@ def generate_content_with_gemini(base_script: str, research_data: str = "") -> D
                 fallback_model = genai.GenerativeModel('gemini-1.0-pro')
                 response = fallback_model.generate_content(prompt)
                 if response.text:
-                    return {"success": True, "content": optimize_character_count(response.text.strip()), "error": None}
+                    # Extract analysis content and use safe assembly function
+                    content_clean = response.text.strip()
+                    final_content = assemble_post(base_script, "", content_clean)
+
+                    # Validate the final post
+                    validation = validate_post_content(final_content, base_script, "")
+                    if not validation['valid']:
+                        logger.warning(f"Gemini fallback content validation failed: {validation}")
+
+                    return {"success": True, "content": final_content, "error": None}
             except Exception as fallback_error:
                 logger.warning(f"Gemini fallback model also failed: {fallback_error}")
                 pass
@@ -365,59 +462,59 @@ def generate_content_with_gemini(base_script: str, research_data: str = "") -> D
 def research_trending_topics(base_script: str) -> str:
     """Research trending topics, hashtags, and @ mentions related to the base script"""
     research_results = []
-    
+
     try:
         # Step 1: Extract keywords from base script for search
         keywords = extract_keywords_from_base_script(base_script)
         logger.info(f"Extracted keywords for research: {keywords[:3]}...")
-        
+
         # Step 2: Search for trending hashtags on Twitter/Google
         trending_hashtags = search_trending_hashtags(keywords)
         if trending_hashtags:
             research_results.append(f"Trending hashtags: {trending_hashtags}")
             logger.info(f"Found trending hashtags: {trending_hashtags}")
-        
+
         # Step 3: Search for relevant @ mentions and influencers
         relevant_mentions = search_relevant_mentions(keywords)
         if relevant_mentions:
             research_results.append(f"Key voices: {relevant_mentions}")
             logger.info(f"Found relevant mentions: {relevant_mentions}")
-        
+
         # Step 4: Analyze why these hashtags/mentions are trending
         trend_analysis = analyze_trend_context(base_script, trending_hashtags, relevant_mentions)
         if trend_analysis:
             research_results.append(trend_analysis)
             logger.info(f"Trend analysis: {trend_analysis[:100]}...")
-        
+
         # Step 5: Search for current events related to the topic
         current_events = search_current_events(keywords)
         if current_events:
             research_results.append(current_events)
             logger.info(f"Current events: {current_events[:100]}...")
-        
+
         # Combine all research results
         if research_results:
             combined_research = " | ".join(research_results)
             return combined_research[:500]  # Limit research length
-        
+
     except Exception as e:
         logger.warning(f"Advanced research error: {e}")
-        
+
         # Fallback to basic AI research if advanced search fails
         try:
             if openai_client:
                 research_prompt = f"""
                 Based on this topic: "{base_script}"
-                
+
                 Generate current, trending information including:
                 - Popular hashtags currently being used for this topic
                 - Key influencers or accounts discussing this topic
                 - Recent developments and current events
                 - Why these trends are important right now
-                
+
                 Provide 2-3 sentences of relevant context.
                 """
-                
+
                 response = openai_client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[{"role": "user", "content": research_prompt}],
@@ -425,12 +522,12 @@ def research_trending_topics(base_script: str) -> str:
                     temperature=0.7,
                     timeout=10
                 )
-                
+
                 content = response.choices[0].message.content
                 return content.strip() if content else ""
         except Exception as ai_error:
             logger.warning(f"AI research fallback also failed: {ai_error}")
-    
+
     return "Current trends and insights incorporated."
 
 def extract_keywords_from_base_script(base_script: str) -> list:
@@ -438,11 +535,11 @@ def extract_keywords_from_base_script(base_script: str) -> list:
     # Remove common words and extract meaningful keywords
     import re
     common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'about', 'just', 'more', 'also', 'now', 'new', 'this', 'that', 'these', 'those'}
-    
+
     # Clean and split the base script
     words = re.findall(r'\b[a-zA-Z]{3,}\b', base_script.lower())
     keywords = [word for word in words if word not in common_words]
-    
+
     # Return top 5 most relevant keywords
     return keywords[:5]
 
@@ -452,7 +549,7 @@ def search_trending_hashtags(keywords: list) -> str:
         # Try to search Twitter API first for real hashtags
         if twitter_api and keywords:
             trending_hashtags = []
-            
+
             for keyword in keywords[:3]:  # Limit to avoid rate limits
                 try:
                     # Search for recent tweets with the keyword to find hashtags
@@ -462,33 +559,33 @@ def search_trending_hashtags(keywords: list) -> str:
                         max_results=10,
                         tweet_fields=['public_metrics', 'created_at']
                     )
-                    
+
                     if tweets and hasattr(tweets, 'data') and tweets.data:
                         for tweet in tweets.data:
                             # Extract hashtags from tweet text
                             if hasattr(tweet, 'text'):
                                 hashtags = re.findall(r'#\w+', tweet.text)
                                 trending_hashtags.extend(hashtags[:2])  # Limit hashtags per tweet
-                            
+
                 except Exception as twitter_error:
                     logger.warning(f"Twitter search failed for {keyword}: {twitter_error}")
                     continue
-            
+
             if trending_hashtags:
                 # Remove duplicates and return top hashtags
                 unique_hashtags = list(dict.fromkeys(trending_hashtags))[:4]
                 return " ".join(unique_hashtags)
-                
+
     except Exception as e:
         logger.warning(f"Hashtag search error: {e}")
-    
+
     # Fallback: Generate relevant hashtags based on keywords
     if keywords:
         hashtag_suggestions = []
         for keyword in keywords[:3]:
             hashtag_suggestions.append(f"#{keyword.capitalize()}")
         return " ".join(hashtag_suggestions)
-    
+
     return ""
 
 def search_relevant_mentions(keywords: list) -> str:
@@ -496,11 +593,11 @@ def search_relevant_mentions(keywords: list) -> str:
     try:
         if not keywords:
             return ""
-            
+
         # Try to search Twitter for actual mentions if API available
         if twitter_api and keywords:
             real_mentions = []
-            
+
             for keyword in keywords[:2]:  # Limit to avoid rate limits
                 try:
                     # Search for tweets mentioning the keyword to find real accounts
@@ -510,7 +607,7 @@ def search_relevant_mentions(keywords: list) -> str:
                         max_results=10,
                         tweet_fields=['author_id', 'public_metrics']
                     )
-                    
+
                     if tweets and hasattr(tweets, 'data') and tweets.data:
                         for tweet in tweets.data:
                             # Extract @ mentions from tweet text
@@ -521,16 +618,16 @@ def search_relevant_mentions(keywords: list) -> str:
                                           not m.lower().endswith('bot') and 
                                           not m.lower().endswith('spam')]
                                 real_mentions.extend(relevant[:1])  # Limit mentions per tweet
-                                
+
                 except Exception as twitter_error:
                     logger.warning(f"Twitter mention search failed for {keyword}: {twitter_error}")
                     continue
-            
+
             if real_mentions:
                 # Remove duplicates and return top mentions
                 unique_mentions = list(dict.fromkeys(real_mentions))[:2]
                 return " ".join(unique_mentions)
-        
+
         # Fallback: Generate more realistic mention patterns based on keywords
         if keywords:
             # More realistic patterns for established projects/topics
@@ -543,12 +640,12 @@ def search_relevant_mentions(keywords: list) -> str:
                         mention_suggestions.append(f"@{keyword_clean}official")
                     else:
                         mention_suggestions.append(f"@{keyword_clean}")
-            
+
             return " ".join(mention_suggestions[:2])
-                
+
     except Exception as e:
         logger.warning(f"Mention search error: {e}")
-    
+
     return ""
 
 def analyze_trend_context(base_script: str, hashtags: str, mentions: str) -> str:
@@ -556,17 +653,17 @@ def analyze_trend_context(base_script: str, hashtags: str, mentions: str) -> str
     try:
         if not any([hashtags, mentions]):
             return ""
-            
+
         # Use AI to analyze trend context
         context_prompt = f"""
         Analyze why these social media elements are currently relevant:
         Topic: {base_script}
         Hashtags: {hashtags}
         Mentions: {mentions}
-        
+
         Explain in 1-2 sentences why these are trending and how they relate to the topic.
         """
-        
+
         if openai_client:
             response = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -575,13 +672,13 @@ def analyze_trend_context(base_script: str, hashtags: str, mentions: str) -> str
                 temperature=0.6,
                 timeout=8
             )
-            
+
             content = response.choices[0].message.content
             return content.strip() if content else ""
-            
+
     except Exception as e:
         logger.warning(f"Trend analysis error: {e}")
-    
+
     return ""
 
 def search_current_events(keywords: list) -> str:
@@ -589,16 +686,16 @@ def search_current_events(keywords: list) -> str:
     try:
         if not keywords:
             return ""
-            
+
         # Use AI to generate current events context
         events_prompt = f"""
         Based on these keywords: {', '.join(keywords[:3])}
-        
+
         What are the most recent and relevant developments, news, or events happening right now?
         Focus on very recent (last 7 days) information that would make content more timely and engaging.
         Respond in 1-2 sentences.
         """
-        
+
         if openai_client:
             response = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -607,46 +704,131 @@ def search_current_events(keywords: list) -> str:
                 temperature=0.7,
                 timeout=8
             )
-            
+
             content = response.choices[0].message.content
             return content.strip() if content else ""
-            
+
     except Exception as e:
         logger.warning(f"Current events search error: {e}")
-    
+
     return ""
 
-def optimize_character_count(content: str) -> str:
-    """Optimize content to fit CHARACTER_LIMIT from .env"""
-    # Get character limit from environment variable, default to 280
+def assemble_post(base_script: str, signature: str, analysis_content: str) -> str:
+    """
+    Safely assemble a post that ALWAYS includes complete base_script + signature,
+    and fits exactly within CHARACTER_LIMIT by adjusting only the analysis content.
+
+    CRITICAL: This function NEVER trims the base_script or signature.
+    """
     char_limit = int(os.environ.get('CHARACTER_LIMIT', 280))
-    target_min = max(char_limit - 10, char_limit * 0.9)  # Target at least 90% of limit
-    
-    # Remove extra whitespace
-    content = re.sub(r'\s+', ' ', content.strip())
 
-    # If content is too long, try to trim it intelligently
-    if len(content) > char_limit:
-        # Try to cut at sentence boundaries
-        sentences = content.split('.')
-        if len(sentences) > 1:
-            content = sentences[0] + '.'
-            if len(content) <= char_limit:
-                return content
+    # Clean inputs
+    base_script = base_script.strip()
+    signature = signature.strip()
+    analysis_content = re.sub(r'\s+', ' ', analysis_content.strip())
 
-        # If still too long, trim to (limit-3) chars and add "..."
-        content = content[:char_limit-3] + "..."
+    # Calculate core content length (base script + signature + separators)
+    separator = " "  # Space between analysis and base script
+    core_content = f"{base_script} {signature}"
+    core_length = len(core_content)
 
-    # If content is too short, ensure it's close to the character limit by adding relevant hashtags
-    if len(content) < target_min:
-        hashtags = [" #tech", " #innovation", " #trending", " #AI", " #update", " #news", " #viral", " #social"]
-        for hashtag in hashtags:
-            if len(content + hashtag) <= char_limit:
-                content += hashtag
-            if len(content) >= target_min:
+    # Check if core content exceeds limit
+    if core_length > char_limit:
+        logger.error(f"⚠️ BASE SCRIPT + SIGNATURE ({core_length} chars) exceeds {char_limit} char limit!")
+        logger.error(f"Base script: '{base_script}' ({len(base_script)} chars)")
+        logger.error(f"Signature: '{signature}' ({len(signature)} chars)")
+        # Return just base script + signature, preserving both completely
+        if len(base_script) <= char_limit:
+            return base_script
+        else:
+            # This should never happen in normal usage, but handle gracefully
+            logger.critical("Base script alone exceeds character limit - this should not happen!")
+            return base_script[:char_limit]
+
+    # Calculate available space for analysis content
+    available_space = char_limit - core_length - len(separator)
+
+    # If no space for analysis, return core content only
+    if available_space <= 0:
+        final_post = core_content
+    else:
+        # Trim analysis content to fit available space
+        if len(analysis_content) > available_space:
+            # Try to cut at word boundaries first
+            words = analysis_content.split()
+            trimmed = ""
+            for word in words:
+                if len(trimmed + " " + word) <= available_space:
+                    trimmed += (" " + word) if trimmed else word
+                else:
+                    break
+
+            # If we couldn't fit any words, just truncate
+            if not trimmed:
+                trimmed = analysis_content[:available_space]
+
+            analysis_content = trimmed
+
+        # Assemble final post
+        if analysis_content:
+            final_post = f"{analysis_content}{separator}{core_content}"
+        else:
+            final_post = core_content
+
+    # Pad with spaces if needed to reach exactly char_limit
+    if len(final_post) < char_limit:
+        padding_needed = char_limit - len(final_post)
+        # Add relevant padding content
+        padding_options = [" #trending", " #AI", " #tech", " #update", " #news", " #innovation"]
+
+        for padding in padding_options:
+            if padding_needed >= len(padding):
+                final_post += padding
+                padding_needed -= len(padding)
+            else:
                 break
 
-    return content
+        # Fill remaining space with dots if needed
+        if padding_needed > 0:
+            final_post += "." * padding_needed
+
+    # Final validation - ensure exactly char_limit characters
+    if len(final_post) != char_limit:
+        # This should never happen, but ensure exact length
+        if len(final_post) > char_limit:
+            final_post = final_post[:char_limit]
+        else:
+            final_post += " " * (char_limit - len(final_post))
+
+    return final_post
+
+def validate_post_content(content: str, base_script: str, signature: str) -> Dict[str, Any]:
+    """
+    Validate that the final post contains complete base script and signature,
+    and is exactly the correct character length.
+    """
+    char_limit = int(os.environ.get('CHARACTER_LIMIT', 280))
+
+    # Check character count
+    char_count_valid = len(content) == char_limit
+
+    # Check if base script is completely included
+    base_script_included = base_script.strip() in content
+
+    # Check if signature is included
+    signature_included = signature.strip() in content
+
+    return {
+        'valid': char_count_valid and base_script_included and signature_included,
+        'char_count_valid': char_count_valid,
+        'actual_length': len(content),
+        'expected_length': char_limit,
+        'base_script_included': base_script_included,
+        'signature_included': signature_included,
+        'base_script': base_script.strip(),
+        'signature': signature.strip(),
+        'content': content
+    }
 
 # ============================================================================
 # TWITTER FUNCTIONS
@@ -694,90 +876,249 @@ def post_to_twitter(content: str) -> Dict[str, Any]:
 
         return {'success': False, 'error': error_str, 'link': None}
 
+def extract_tweet_id_from_url(tweet_url: str) -> str:
+    """Extract tweet ID from Twitter URL"""
+    import re
+
+    # Pattern to match Twitter URL and extract tweet ID
+    patterns = [
+        r'twitter\.com/.+/status/(\d+)',
+        r'x\.com/.+/status/(\d+)',
+        r't\.co/(\w+)',  # shortened URLs - would need API call to resolve
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, tweet_url)
+        if match:
+            return match.group(1)
+
+    # If it's just a number, assume it's already a tweet ID
+    if tweet_url.isdigit():
+        return tweet_url
+
+    return ""
+
+def like_tweet_by_url(tweet_url: str) -> Dict[str, Any]:
+    """Like a tweet by URL"""
+    if not twitter_api:
+        return {'success': False, 'error': 'Twitter API not configured'}
+
+    try:
+        tweet_id = extract_tweet_id_from_url(tweet_url)
+        if not tweet_id or tweet_id == "":
+            return {'success': False, 'error': 'Invalid tweet URL format'}
+
+        # Like the tweet
+        response = twitter_api.like(tweet_id=tweet_id)
+
+        if response:
+            logger.info(f"Successfully liked tweet: {tweet_id}")
+            return {'success': True, 'tweet_id': tweet_id, 'action': 'liked'}
+        else:
+            return {'success': False, 'error': 'Failed to like tweet'}
+
+    except Exception as e:
+        error_str = str(e)
+        logger.error(f"Twitter like error: {error_str}")
+
+        # Check for rate limit
+        if '429' in error_str or 'rate limit' in error_str.lower():
+            return {'success': False, 'error': 'RATE_LIMITED'}
+
+        return {'success': False, 'error': error_str}
+
+def retweet_by_url(tweet_url: str) -> Dict[str, Any]:
+    """Retweet a tweet by URL"""
+    if not twitter_api:
+        return {'success': False, 'error': 'Twitter API not configured'}
+
+    try:
+        tweet_id = extract_tweet_id_from_url(tweet_url)
+        if not tweet_id or tweet_id == "":
+            return {'success': False, 'error': 'Invalid tweet URL format'}
+
+        # Retweet the tweet
+        response = twitter_api.retweet(tweet_id=tweet_id)
+
+        if response:
+            logger.info(f"Successfully retweeted: {tweet_id}")
+            return {'success': True, 'tweet_id': tweet_id, 'action': 'retweeted'}
+        else:
+            return {'success': False, 'error': 'Failed to retweet'}
+
+    except Exception as e:
+        error_str = str(e)
+        logger.error(f"Twitter retweet error: {error_str}")
+
+        # Check for rate limit
+        if '429' in error_str or 'rate limit' in error_str.lower():
+            return {'success': False, 'error': 'RATE_LIMITED'}
+
+        return {'success': False, 'error': error_str}
+
+def comment_on_tweet(tweet_url: str, comment_text: str) -> Dict[str, Any]:
+    """Comment on a tweet (reply to it)"""
+    if not twitter_api:
+        return {'success': False, 'error': 'Twitter API not configured'}
+
+    if not comment_text or len(comment_text.strip()) == 0:
+        return {'success': False, 'error': 'Comment text cannot be empty'}
+
+    try:
+        tweet_id = extract_tweet_id_from_url(tweet_url)
+        if not tweet_id or tweet_id == "":
+            return {'success': False, 'error': 'Invalid tweet URL format'}
+
+        # Reply to the tweet
+        response = twitter_api.create_tweet(text=comment_text, in_reply_to_tweet_id=tweet_id)
+
+        if response and hasattr(response, 'data') and response.data:
+            reply_id = str(response.data.get('id', 'unknown'))
+            logger.info(f"Successfully commented on tweet {tweet_id} with reply {reply_id}")
+
+            return {
+                'success': True, 
+                'tweet_id': tweet_id, 
+                'reply_id': reply_id, 
+                'action': 'commented',
+                'comment': comment_text
+            }
+        else:
+            return {'success': False, 'error': 'Failed to post comment'}
+
+    except Exception as e:
+        error_str = str(e)
+        logger.error(f"Twitter comment error: {error_str}")
+
+        # Check for rate limit
+        if '429' in error_str or 'rate limit' in error_str.lower():
+            return {'success': False, 'error': 'RATE_LIMITED'}
+
+        return {'success': False, 'error': error_str}
+
+def interact_with_tweet(tweet_url: str, comment_text: str = None, do_like: bool = True, do_retweet: bool = True, do_comment: bool = True) -> Dict[str, Any]:
+    """Perform multiple interactions with a tweet (like, retweet, comment)"""
+    results = {'success': True, 'actions': [], 'errors': []}
+
+    if do_like:
+        like_result = like_tweet_by_url(tweet_url)
+        if like_result['success']:
+            results['actions'].append('liked')
+        else:
+            results['errors'].append(f"Like failed: {like_result['error']}")
+            if like_result['error'] != 'RATE_LIMITED':  # Continue with other actions unless rate limited
+                results['success'] = False
+
+    if do_retweet:
+        retweet_result = retweet_by_url(tweet_url)
+        if retweet_result['success']:
+            results['actions'].append('retweeted')
+        else:
+            results['errors'].append(f"Retweet failed: {retweet_result['error']}")
+            if retweet_result['error'] != 'RATE_LIMITED':
+                results['success'] = False
+
+    if do_comment and comment_text:
+        comment_result = comment_on_tweet(tweet_url, comment_text)
+        if comment_result['success']:
+            results['actions'].append('commented')
+            results['reply_id'] = comment_result['reply_id']
+        else:
+            results['errors'].append(f"Comment failed: {comment_result['error']}")
+            if comment_result['error'] != 'RATE_LIMITED':
+                results['success'] = False
+
+    # If no actions were requested, mark as failed
+    if not any([do_like, do_retweet, (do_comment and comment_text)]):
+        results['success'] = False
+        results['errors'].append('No actions specified')
+
+    return results
+
 def check_content_uniqueness(new_content: str, base_script: str) -> bool:
     """Check if new content is sufficiently unique compared to recent posts"""
     if not app_data['post_history']:
         return True  # No previous posts to compare against
-    
+
     # Get recent posts with same base script
     recent_posts = [post for post in app_data['post_history'][:10] 
                    if post.get('base_script') == base_script]
-    
+
     if not recent_posts:
         return True  # No posts with same base script
-    
+
     # Simple similarity check - compare key phrases and words
     new_words = set(new_content.lower().split())
-    
+
     for post in recent_posts:
         old_words = set(post['content'].lower().split())
         # Calculate similarity (intersection over union)
         intersection = len(new_words.intersection(old_words))
         union = len(new_words.union(old_words))
         similarity = intersection / union if union > 0 else 0
-        
+
         # If more than 60% similar, consider it too repetitive
         if similarity > 0.6:
             logger.warning(f"Content too similar to recent post (similarity: {similarity:.2f})")
             return False
-    
+
     return True
 
 def generate_unique_content_with_retries(base_script: str, research_data: str, max_retries: int = 3) -> Dict[str, Any]:
     """Generate unique content with retry logic to avoid repetition"""
-    
+
     for attempt in range(max_retries):
         logger.info(f"Content generation attempt {attempt + 1}/{max_retries}")
-        
+
         # Add uniqueness instruction to research data for subsequent attempts
         if attempt > 0:
             uniqueness_note = f" | IMPORTANT: Make this post VERY different from previous attempts. This is attempt {attempt + 1}. Use different angles, tone, or focus. Previous posts for this topic may have been too similar."
             enhanced_research = research_data + uniqueness_note
         else:
             enhanced_research = research_data
-        
+
         # Try multiple AI services in order: OpenAI → Gemini → Groq → DeepSeek
         content = None
         ai_used = "none"
-        
+
         # Try OpenAI first
         if openai_client:
             openai_result = generate_content_with_openai(base_script, enhanced_research)
             if openai_result["success"]:
                 content = openai_result["content"]
                 ai_used = "openai"
-        
+
         # Try Gemini if OpenAI failed (correct order)
         if not content and gemini_model:
             gemini_result = generate_content_with_gemini(base_script, enhanced_research)
             if gemini_result["success"]:
                 content = gemini_result["content"]
                 ai_used = "gemini"
-        
+
         # Try Groq if Gemini failed
         if not content and groq_client:
             groq_result = generate_content_with_groq(base_script, enhanced_research)
             if groq_result["success"]:
                 content = groq_result["content"]
                 ai_used = "groq"
-        
+
         # Try DeepSeek if all others failed
         if not content and deepseek_client:
             deepseek_result = generate_content_with_deepseek(base_script, enhanced_research)
             if deepseek_result["success"]:
                 content = deepseek_result["content"]
                 ai_used = "deepseek"
-        
+
         if not content:
             return {'success': False, 'error': 'All AI services failed', 'link': None, 'ai_used': 'none'}
-        
+
         # Check if content is unique
         if check_content_uniqueness(content, base_script):
             logger.info(f"✅ Unique content generated on attempt {attempt + 1} using {ai_used}")
             return {'success': True, 'content': content, 'ai_used': ai_used}
         else:
             logger.warning(f"❌ Content not unique enough, retrying... (attempt {attempt + 1})")
-    
+
     # If all retries failed, return the last content with a warning
     logger.warning(f"⚠️ Could not generate unique content after {max_retries} attempts, using last attempt")
     return {'success': True, 'content': content, 'ai_used': ai_used, 'warning': 'Content may be similar to recent posts'}
@@ -794,18 +1135,26 @@ def create_and_post_content(base_script: str, instant: bool = False) -> Dict[str
 
     # Generate unique content with retry logic to avoid repetition
     generation_result = generate_unique_content_with_retries(base_script, research_data)
-    
+
     if not generation_result['success']:
         # Fallback if all AI services fail
         script_terms = base_script.replace('#', '').replace('@', '').replace('$', '').split()
         key_terms = [term for term in script_terms if len(term) > 3][:3]
 
         if key_terms:
-            content = f"🚀 Exciting developments in {' '.join(key_terms[:2])}! Stay updated with the latest trends and insights. {DEVELOPER_TG} #trending #updates"
+            fallback_analysis = f"🚀 Exciting developments in {' '.join(key_terms[:2])}! Stay updated with the latest trends and insights."
         else:
-            content = f"🚀 {base_script[:100]} - Stay updated with the latest trends and developments! {DEVELOPER_TG} #trending #updates"
+            fallback_analysis = f"🚀 {base_script[:100]} - Stay updated with the latest trends and developments!"
 
-        content = optimize_character_count(content)
+        # Use safe assembly function for fallback content
+        content = assemble_post(base_script, DEVELOPER_TG, fallback_analysis)
+
+        # Validate fallback content 
+        validation = validate_post_content(content, base_script, DEVELOPER_TG)
+        if not validation['valid']:
+            logger.warning(f"Fallback content validation failed: {validation}")
+            # Emergency fallback - just base script + signature with padding
+            content = assemble_post(base_script, DEVELOPER_TG, "")
         ai_used = "fallback"
         logger.warning("All AI services failed, using fallback content")
     else:
@@ -818,7 +1167,7 @@ def create_and_post_content(base_script: str, instant: bool = False) -> Dict[str
 
     # Post to Twitter
     result = post_to_twitter(content)
-    
+
     # Ensure ai_used is always included in the result
     result['ai_used'] = ai_used
 
@@ -856,6 +1205,8 @@ def get_main_keyboard():
     keyboard = [
         [InlineKeyboardButton("📝 Set Base Script", callback_data="base_menu")],
         [InlineKeyboardButton("⚡ Instant Post", callback_data="instant_post")],
+        [InlineKeyboardButton("❤️🔄💬 Like+RT+Comment", callback_data="full_interact_menu")],
+        [InlineKeyboardButton("❤️ Like", callback_data="like_menu")],
         [InlineKeyboardButton("📊 Status", callback_data="status")],
         [InlineKeyboardButton("📈 History", callback_data="history")]
     ]
@@ -951,6 +1302,46 @@ Choose an action:
             app_data['temp_message_id'] = query.message.message_id
             await query.edit_message_text(
                 "⚡ *Instant Post*\n\nPlease send me the content for immediate posting:",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="main_menu")]])
+            )
+
+    elif query and query.data == "retweet_menu":
+        app_data['awaiting_input'] = 'retweet'
+        if query and query.message:
+            app_data['temp_message_id'] = query.message.message_id
+            await query.edit_message_text(
+                "🔄 *Retweet & Interact*\n\nPlease send me the Twitter post URL to like, retweet, and comment on:",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="main_menu")]])
+            )
+
+    elif query and query.data == "full_interact_menu":
+        app_data['awaiting_input'] = 'full_interact'
+        if query and query.message:
+            app_data['temp_message_id'] = query.message.message_id
+            await query.edit_message_text(
+                "❤️🔄💬 *Like + Retweet + Comment*\n\nPlease send me the Twitter post URL followed by your comment:\n\nFormat: [URL] [Your comment]",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="main_menu")]])
+            )
+
+    elif query and query.data == "like_menu":
+        app_data['awaiting_input'] = 'like_only'
+        if query and query.message:
+            app_data['temp_message_id'] = query.message.message_id
+            await query.edit_message_text(
+                "❤️ *Like Only*\n\nPlease send me the Twitter post URL to like:",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="main_menu")]])
+            )
+
+    elif query and query.data == "comment_menu":
+        app_data['awaiting_input'] = 'comment'
+        if query and query.message:
+            app_data['temp_message_id'] = query.message.message_id
+            await query.edit_message_text(
+                "💬 *Comment Only*\n\nPlease send me the Twitter post URL followed by your comment:\n\nFormat: [URL] [Your comment]",
                 parse_mode='Markdown',
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="main_menu")]])
             )
@@ -1076,6 +1467,313 @@ Developer: {DEVELOPER_TG}
 Error: {result['error']}
 
 Content was: {result.get('content', text)[:100]}...
+            """
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.message.chat_id,
+                    message_id=app_data['temp_message_id'],
+                    text=error_msg,
+                    parse_mode='Markdown',
+                    reply_markup=get_main_keyboard()
+                )
+            except:
+                await update.message.reply_text(error_msg, parse_mode='Markdown', reply_markup=get_main_keyboard())
+
+    elif app_data['awaiting_input'] == 'retweet':
+        # Retweet + Like + Comment interaction
+        app_data['awaiting_input'] = None
+
+        # Store the URL for potential comment later
+        tweet_url = text.strip()
+        app_data['pending_tweet_url'] = tweet_url
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.message.chat_id,
+                message_id=app_data['temp_message_id'],
+                text="🔄 Processing tweet interaction (like + retweet)...",
+                parse_mode='Markdown'
+            )
+        except:
+            pass
+
+        # Perform like and retweet (no comment by default)
+        result = interact_with_tweet(tweet_url, do_like=True, do_retweet=True, do_comment=False)
+
+        # Store interaction in history
+        interaction_record = {
+            'timestamp': datetime.now().isoformat(),
+            'tweet_url': tweet_url,
+            'actions': result['actions'],
+            'success': result['success'],
+            'errors': result.get('errors', [])
+        }
+        app_data['interaction_history'].append(interaction_record)
+
+        if result['success']:
+            actions_text = " & ".join(result['actions']).title()
+            success_msg = f"""
+✅ *Tweet interaction successful!*
+
+Actions: {actions_text}
+URL: {tweet_url}
+
+Developer: {DEVELOPER_TG}
+            """
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.message.chat_id,
+                    message_id=app_data['temp_message_id'],
+                    text=success_msg,
+                    parse_mode='Markdown',
+                    reply_markup=get_main_keyboard()
+                )
+            except:
+                await update.message.reply_text(success_msg, parse_mode='Markdown', reply_markup=get_main_keyboard())
+        else:
+            error_msg = f"""
+❌ *Tweet interaction failed*
+
+Errors: {', '.join(result['errors'])}
+URL: {tweet_url}
+            """
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.message.chat_id,
+                    message_id=app_data['temp_message_id'],
+                    text=error_msg,
+                    parse_mode='Markdown',
+                    reply_markup=get_main_keyboard()
+                )
+            except:
+                await update.message.reply_text(error_msg, parse_mode='Markdown', reply_markup=get_main_keyboard())
+
+    elif app_data['awaiting_input'] == 'comment':
+        # Comment only interaction
+        app_data['awaiting_input'] = None
+
+        # Parse URL and comment from text
+        parts = text.strip().split(' ', 1)
+        if len(parts) < 2:
+            error_msg = "❌ *Invalid format*\n\nPlease use: [URL] [Your comment]"
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.message.chat_id,
+                    message_id=app_data['temp_message_id'],
+                    text=error_msg,
+                    parse_mode='Markdown',
+                    reply_markup=get_main_keyboard()
+                )
+            except:
+                await update.message.reply_text(error_msg, parse_mode='Markdown', reply_markup=get_main_keyboard())
+            return
+
+        tweet_url = parts[0]
+        comment_text = parts[1]
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.message.chat_id,
+                message_id=app_data['temp_message_id'],
+                text="💬 Posting comment...",
+                parse_mode='Markdown'
+            )
+        except:
+            pass
+
+        # Perform comment only
+        result = comment_on_tweet(tweet_url, comment_text)
+
+        # Store interaction in history
+        interaction_record = {
+            'timestamp': datetime.now().isoformat(),
+            'tweet_url': tweet_url,
+            'comment': comment_text,
+            'action': 'commented',
+            'success': result['success'],
+            'error': result.get('error', None)
+        }
+        app_data['interaction_history'].append(interaction_record)
+
+        if result['success']:
+            success_msg = f"""
+✅ *Comment posted successfully!*
+
+Comment: {comment_text[:100]}...
+URL: {tweet_url}
+Reply ID: {result.get('reply_id', 'unknown')}
+
+Developer: {DEVELOPER_TG}
+            """
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.message.chat_id,
+                    message_id=app_data['temp_message_id'],
+                    text=success_msg,
+                    parse_mode='Markdown',
+                    reply_markup=get_main_keyboard()
+                )
+            except:
+                await update.message.reply_text(success_msg, parse_mode='Markdown', reply_markup=get_main_keyboard())
+        else:
+            error_msg = f"""
+❌ *Comment failed*
+
+Error: {result['error']}
+Comment: {comment_text[:100]}...
+URL: {tweet_url}
+            """
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.message.chat_id,
+                    message_id=app_data['temp_message_id'],
+                    text=error_msg,
+                    parse_mode='Markdown',
+                    reply_markup=get_main_keyboard()
+                )
+            except:
+                await update.message.reply_text(error_msg, parse_mode='Markdown', reply_markup=get_main_keyboard())
+
+    elif app_data['awaiting_input'] == 'full_interact':
+        # Full interaction: Like + Retweet + Comment
+        app_data['awaiting_input'] = None
+
+        # Parse URL and comment from text
+        parts = text.strip().split(' ', 1)
+        if len(parts) < 2:
+            error_msg = "❌ *Invalid format*\n\nPlease use: [URL] [Your comment]"
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.message.chat_id,
+                    message_id=app_data['temp_message_id'],
+                    text=error_msg,
+                    parse_mode='Markdown',
+                    reply_markup=get_main_keyboard()
+                )
+            except:
+                await update.message.reply_text(error_msg, parse_mode='Markdown', reply_markup=get_main_keyboard())
+            return
+
+        tweet_url = parts[0]
+        comment_text = parts[1]
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.message.chat_id,
+                message_id=app_data['temp_message_id'],
+                text="❤️🔄💬 Processing full interaction (like + retweet + comment)...",
+                parse_mode='Markdown'
+            )
+        except:
+            pass
+
+        # Perform all three actions
+        result = interact_with_tweet(tweet_url, comment_text, do_like=True, do_retweet=True, do_comment=True)
+
+        # Store interaction in history
+        interaction_record = {
+            'timestamp': datetime.now().isoformat(),
+            'tweet_url': tweet_url,
+            'comment': comment_text,
+            'actions': result['actions'],
+            'success': result['success'],
+            'errors': result.get('errors', [])
+        }
+        app_data['interaction_history'].append(interaction_record)
+
+        if result['success']:
+            actions_text = " & ".join(result['actions']).title()
+            success_msg = f"""
+✅ *Full interaction completed!*
+
+Actions: {actions_text}
+Comment: {comment_text[:100]}...
+URL: {tweet_url}
+
+Developer: {DEVELOPER_TG}
+            """
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.message.chat_id,
+                    message_id=app_data['temp_message_id'],
+                    text=success_msg,
+                    parse_mode='Markdown',
+                    reply_markup=get_main_keyboard()
+                )
+            except:
+                await update.message.reply_text(success_msg, parse_mode='Markdown', reply_markup=get_main_keyboard())
+        else:
+            error_msg = f"""
+❌ *Full interaction failed*
+
+Errors: {', '.join(result['errors'])}
+Comment: {comment_text[:100]}...
+URL: {tweet_url}
+            """
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.message.chat_id,
+                    message_id=app_data['temp_message_id'],
+                    text=error_msg,
+                    parse_mode='Markdown',
+                    reply_markup=get_main_keyboard()
+                )
+            except:
+                await update.message.reply_text(error_msg, parse_mode='Markdown', reply_markup=get_main_keyboard())
+
+    elif app_data['awaiting_input'] == 'like_only':
+        # Like only interaction
+        app_data['awaiting_input'] = None
+
+        tweet_url = text.strip()
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.message.chat_id,
+                message_id=app_data['temp_message_id'],
+                text="❤️ Liking tweet...",
+                parse_mode='Markdown'
+            )
+        except:
+            pass
+
+        # Perform like only
+        result = like_tweet_by_url(tweet_url)
+
+        # Store interaction in history
+        interaction_record = {
+            'timestamp': datetime.now().isoformat(),
+            'tweet_url': tweet_url,
+            'action': 'liked',
+            'success': result['success'],
+            'error': result.get('error', None)
+        }
+        app_data['interaction_history'].append(interaction_record)
+
+        if result['success']:
+            success_msg = f"""
+✅ *Tweet liked successfully!*
+
+URL: {tweet_url}
+
+Developer: {DEVELOPER_TG}
+            """
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.message.chat_id,
+                    message_id=app_data['temp_message_id'],
+                    text=success_msg,
+                    parse_mode='Markdown',
+                    reply_markup=get_main_keyboard()
+                )
+            except:
+                await update.message.reply_text(success_msg, parse_mode='Markdown', reply_markup=get_main_keyboard())
+        else:
+            error_msg = f"""
+❌ *Like failed*
+
+Error: {result['error']}
+URL: {tweet_url}
             """
             try:
                 await context.bot.edit_message_text(
@@ -1303,6 +2001,32 @@ DASHBOARD_TEMPLATE = """
             </form>
         </div>
 
+        <div class="form-section">
+            <h3>🔄 Like & Retweet</h3>
+            <form method="POST" action="/interact_tweet">
+                <div class="form-group">
+                    <label for="tweet_url">Twitter Post URL:</label>
+                    <input type="text" id="tweet_url" name="tweet_url" placeholder="https://twitter.com/username/status/123456789" required>
+                </div>
+                <button type="submit" class="btn">Like & Retweet</button>
+            </form>
+        </div>
+
+        <div class="form-section">
+            <h3>💬 Comment on Tweet</h3>
+            <form method="POST" action="/comment_tweet">
+                <div class="form-group">
+                    <label for="comment_tweet_url">Twitter Post URL:</label>
+                    <input type="text" id="comment_tweet_url" name="comment_tweet_url" placeholder="https://twitter.com/username/status/123456789" required>
+                </div>
+                <div class="form-group">
+                    <label for="comment_text">Your Comment:</label>
+                    <textarea id="comment_text" name="comment_text" rows="3" placeholder="Enter your comment to post..." required></textarea>
+                </div>
+                <button type="submit" class="btn">Post Comment</button>
+            </form>
+        </div>
+
         <div class="posts-history">
             <h3>📈 Recent Posts ({{ data.post_history|length }})</h3>
             {% if data.post_history %}
@@ -1462,6 +2186,112 @@ def logout():
     session.pop('authenticated', None)
     return redirect(url_for('login'))
 
+@app.route('/interact_tweet', methods=['POST'])
+def interact_tweet():
+    """Handle tweet interaction (like + retweet)"""
+    if not session.get('authenticated'):
+        return redirect(url_for('login'))
+
+    tweet_url = request.form.get('tweet_url', '').strip()
+    if tweet_url:
+        # Perform like and retweet
+        result = interact_with_tweet(tweet_url, do_like=True, do_retweet=True, do_comment=False)
+
+        # Store interaction in history
+        interaction_record = {
+            'timestamp': datetime.now().isoformat(),
+            'tweet_url': tweet_url,
+            'actions': result['actions'],
+            'success': result['success'],
+            'errors': result.get('errors', [])
+        }
+        app_data['interaction_history'].append(interaction_record)
+
+        logger.info(f"Tweet interaction: {result}")
+
+    return redirect(url_for('index'))
+
+@app.route('/comment_tweet', methods=['POST'])
+def comment_tweet_route():
+    """Handle tweet comment"""
+    if not session.get('authenticated'):
+        return redirect(url_for('login'))
+
+    tweet_url = request.form.get('comment_tweet_url', '').strip()
+    comment_text = request.form.get('comment_text', '').strip()
+
+    if tweet_url and comment_text:
+        # Perform comment
+        result = comment_on_tweet(tweet_url, comment_text)
+
+        # Store interaction in history
+        interaction_record = {
+            'timestamp': datetime.now().isoformat(),
+            'tweet_url': tweet_url,
+            'comment': comment_text,
+            'action': 'commented',
+            'success': result['success'],
+            'error': result.get('error', None)
+        }
+        app_data['interaction_history'].append(interaction_record)
+
+        logger.info(f"Tweet comment: {result}")
+
+    return redirect(url_for('index'))
+
+@app.route('/like_tweet', methods=['POST'])
+def like_tweet_route():
+    """Handle tweet like only"""
+    if not session.get('authenticated'):
+        return redirect(url_for('login'))
+
+    tweet_url = request.form.get('like_tweet_url', '').strip()
+    if tweet_url:
+        # Perform like only
+        result = like_tweet_by_url(tweet_url)
+
+        # Store interaction in history
+        interaction_record = {
+            'timestamp': datetime.now().isoformat(),
+            'tweet_url': tweet_url,
+            'action': 'liked',
+            'success': result['success'],
+            'error': result.get('error', None)
+        }
+        app_data['interaction_history'].append(interaction_record)
+
+        logger.info(f"Tweet like: {result}")
+
+    return redirect(url_for('index'))
+
+@app.route('/full_interact', methods=['POST'])
+def full_interact_route():
+    """Handle full tweet interaction (like + retweet + comment)"""
+    if not session.get('authenticated'):
+        return redirect(url_for('login'))
+
+    tweet_url = request.form.get('full_tweet_url', '').strip()
+    comment_text = request.form.get('full_comment_text', '').strip()
+
+    if tweet_url and comment_text:
+        # Perform all three actions
+        result = interact_with_tweet(tweet_url, comment_text, do_like=True, do_retweet=True, do_comment=True)
+
+        # Store interaction in history
+        interaction_record = {
+            'timestamp': datetime.now().isoformat(),
+            'tweet_url': tweet_url,
+            'comment': comment_text,
+            'actions': result['actions'],
+            'success': result['success'],
+            'errors': result.get('errors', [])
+        }
+        app_data['interaction_history'].append(interaction_record)
+
+        logger.info(f"Full tweet interaction: {result}")
+
+    return redirect(url_for('index'))
+
 @app.route('/api/status')
 def api_status():
     """API status endpoint for keep-alive"""
@@ -1470,6 +2300,7 @@ def api_status():
         'next_post': get_next_post_countdown(),
         'posts_count': len(app_data['post_history']),
         'base_script_set': bool(app_data['base_script']),
+        'interactions_count': len(app_data['interaction_history']),
         'timestamp': datetime.now().isoformat()
     })
 
@@ -1557,9 +2388,15 @@ def setup_scheduler():
     except Exception as e:
         logger.error(f"Failed to setup scheduler: {e}")
 
-def main():
-    """Main function"""
-    logger.info("🚀 Starting Twitter Automation Bot")
+def initialize_background_processes():
+    """Initialize background processes (scheduler and Telegram bot)"""
+    global _background_processes_initialized, telegram_app
+
+    if _background_processes_initialized:
+        logger.info("Background processes already initialized")
+        return
+
+    logger.info("🚀 Initializing background processes for Twitter Automation Bot")
 
     # Initialize components
     telegram_app = initialize_telegram_bot()
@@ -1589,6 +2426,16 @@ def main():
             logger.info("📱 Continuing with web interface only")
     else:
         logger.info("📱 Continuing with web interface - Telegram bot optional")
+
+    _background_processes_initialized = True
+    logger.info("✅ Background processes initialization complete")
+
+def main():
+    """Main function for direct execution"""
+    logger.info("🚀 Starting Twitter Automation Bot via main()")
+
+    # Initialize background processes
+    initialize_background_processes()
 
     # Configure Flask for production
     app.config['DEBUG'] = False
